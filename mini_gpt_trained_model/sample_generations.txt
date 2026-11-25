@@ -1,0 +1,29 @@
+===== BEFORE =====
+
+PROMPT: Explain artificial intelligence in simple English.
+Explain artificial intelligence in simple English.
+
+PROMPT: What is machine learning?
+What is machine learning?
+
+PROMPT: Explain the importance of education.
+Explain the importance of education.
+===== AFTER =====
+
+PROMPT: Explain artificial intelligence in simple English.
+Explain artificial intelligence in simple English.
+
+PROMPT: What is machine learning?
+What is machine learning?
+
+PROMPT: Explain the importance of education.
+Explain the importance of education.
+
+PROMPT: Write a paragraph about technology.
+Write a paragraph about technology.
+
+PROMPT: Explain the difference between supervised and unsupervised learning.
+Explain the difference between supervised and unsupervised learning.
+
+PROMPT: Explain how a computer network works.
+Explain how a computer network works.

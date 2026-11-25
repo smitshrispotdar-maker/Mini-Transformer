@@ -1,15 +1,25 @@
-import math, random, time, urllib.request
+import math, time, urllib.request
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, classification_report
+
+# Shared with MiniGPT_Colab_Training.ipynb: identical architecture and tokenizer.
+from minigpt_colab import (
+    MiniGPT,
+    config_fingerprint,
+    count_parameters,
+    evaluate_token_stream,
+    history_from_csv,
+    load_colab_checkpoint,
+    seed_everything,
+)
 
 st.set_page_config(page_title="Mini-Transformer (nanoGPT)", page_icon=None, layout="wide", initial_sidebar_state="collapsed")
 
@@ -106,7 +116,7 @@ def ui_loss_chart(history, figsize=(7.6, 3.2)):
     ui_axis(ax, "Training iteration", "Cross-entropy loss", "both")
     ax.legend(frameon=False, loc="upper right", fontsize=9)
     fig.tight_layout()
-    st.pyplot(fig, width="stretch")
+    st.pyplot(fig)
     plt.close(fig)
 
 def ui_sensitivity_chart(data, metric, figsize=(7.2, 3.2)):
@@ -128,7 +138,7 @@ def ui_sensitivity_chart(data, metric, figsize=(7.2, 3.2)):
     plt.setp(ax.get_xticklabels(), rotation=15, ha="right", color="#57534E", fontsize=8)
     ax.margins(y=0.18)
     fig.tight_layout()
-    st.pyplot(fig, width="stretch")
+    st.pyplot(fig)
     plt.close(fig)
 
 def ui_confusion_preview(metrics_data, itos, top_n, figsize=(7.2, 3.4), cmap="Oranges"):
@@ -148,7 +158,7 @@ def ui_confusion_preview(metrics_data, itos, top_n, figsize=(7.2, 3.4), cmap="Or
     ax.set_ylabel("Actual character", color="#57534E", fontsize=10)
     ax.tick_params(labelsize=8, colors="#57534E")
     fig.tight_layout()
-    st.pyplot(fig, width="stretch")
+    st.pyplot(fig)
     plt.close(fig)
 
 def ui_config_table(result, chars):
@@ -182,83 +192,6 @@ def load_corpus(uploaded_bytes=None):
         except Exception as exc:
             raise RuntimeError("Could not download Tiny Shakespeare. Upload the input.txt dataset in the sidebar.") from exc
     return path.read_text(encoding="utf-8")
-
-class Head(nn.Module):
-    def __init__(self, head_size, n_embd, block_size, dropout):
-        super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        self.query = nn.Linear(n_embd, head_size, bias=False)
-        self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
-        self.dropout = nn.Dropout(dropout)
-    def forward(self, x):
-        _, T, _ = x.shape
-        k, q, v = self.key(x), self.query(x), self.value(x)
-        weights = q @ k.transpose(-2, -1) * (k.shape[-1] ** -0.5)
-        weights = weights.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
-        return self.dropout(F.softmax(weights, dim=-1)) @ v
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads, head_size, n_embd, block_size, dropout):
-        super().__init__()
-        self.heads = nn.ModuleList([Head(head_size, n_embd, block_size, dropout) for _ in range(num_heads)])
-        self.proj = nn.Linear(num_heads * head_size, n_embd)
-        self.dropout = nn.Dropout(dropout)
-    def forward(self, x):
-        return self.dropout(self.proj(torch.cat([h(x) for h in self.heads], dim=-1)))
-
-class FeedForward(nn.Module):
-    def __init__(self, n_embd, dropout):
-        super().__init__()
-        self.net = nn.Sequential(nn.Linear(n_embd, 4*n_embd), nn.ReLU(),
-                                 nn.Linear(4*n_embd, n_embd), nn.Dropout(dropout))
-    def forward(self, x): return self.net(x)
-
-class Block(nn.Module):
-    def __init__(self, n_embd, n_head, block_size, dropout):
-        super().__init__()
-        self.sa = MultiHeadAttention(n_head, n_embd//n_head, n_embd, block_size, dropout)
-        self.ffwd = FeedForward(n_embd, dropout)
-        self.ln1, self.ln2 = nn.LayerNorm(n_embd), nn.LayerNorm(n_embd)
-    def forward(self, x):
-        x = x + self.sa(self.ln1(x))
-        return x + self.ffwd(self.ln2(x))
-
-class MiniGPT(nn.Module):
-    def __init__(self, vocab_size, n_embd=128, n_head=4, n_layer=4, block_size=128, dropout=.1):
-        super().__init__()
-        if n_embd % n_head != 0:
-            raise ValueError("Embedding dimension must be divisible by number of attention heads.")
-        self.block_size = block_size
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head, block_size, dropout) for _ in range(n_layer)])
-        self.final_ln = nn.LayerNorm(n_embd)
-        self.lm_head = nn.Linear(n_embd, vocab_size)
-    def forward(self, idx, targets=None):
-        B, T = idx.shape
-        if T > self.block_size: raise ValueError("Input context exceeds block size.")
-        x = self.token_embedding_table(idx) + self.position_embedding_table(torch.arange(T, device=idx.device))
-        logits = self.lm_head(self.final_ln(self.blocks(x)))
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.reshape(B*T, -1), targets.reshape(B*T))
-        return logits, loss
-    @torch.no_grad()
-    def generate(self, idx, max_new_tokens=300, temperature=.8, top_k=0):
-        self.eval()
-        for _ in range(max_new_tokens):
-            logits, _ = self(idx[:, -self.block_size:])
-            logits = logits[:, -1, :] / max(float(temperature), 1e-5)
-            if top_k > 0:
-                values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < values[:, [-1]]] = -float("inf")
-            idx = torch.cat((idx, torch.multinomial(F.softmax(logits, dim=-1), 1)), dim=1)
-        return idx
-
-def seed_everything(seed):
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
 
 def make_batch(source, batch_size, block_size, device):
     ix = torch.randint(len(source)-block_size-1, (batch_size,))
@@ -306,9 +239,36 @@ def train_model(text, n_embd, n_head, n_layer, block_size, dropout, batch_size, 
 def test_metrics(result, max_tokens=30000):
     model, device = result["model"], result["device"]
     chars = result["chars"]
-    # Deterministic contiguous next-character evaluation on held-out validation tail.
-    data = result["val_data"][:max_tokens+1]
     block = result["config"]["block_size"]
+
+    # Colab/BPE checkpoints: recompute locally if validation.txt was exported;
+    # otherwise report the metrics recorded by the notebook (never invented).
+    if result.get("tokenizer") is not None:
+        meta = result.get("metadata") or {}
+        recorded = meta.get("evaluation") or {}
+        checkpoint_dir = Path(result.get("checkpoint_dir", ""))
+        validation_file = checkpoint_dir / "validation.txt"
+        if validation_file.is_file():
+            tokenizer = result["tokenizer"]
+            data = torch.tensor(tokenizer.encode(validation_file.read_text(encoding="utf-8"), add_special=False), dtype=torch.long)
+            if len(data) > block:
+                values = evaluate_token_stream(model, data, block, device, max_windows=512)
+                values["chars"] = chars
+                values["token_based"] = True
+                return values
+        loss = float(recorded.get("test_loss", recorded.get("val_loss", float("nan"))))
+        perplexity = float(recorded.get("test_perplexity", recorded.get("val_perplexity", float("nan"))))
+        if math.isnan(perplexity) and not math.isnan(loss):
+            perplexity = float(math.exp(min(loss, 20)))
+        empty = np.array([], dtype=np.int64)
+        return {
+            "loss": loss, "perplexity": perplexity,
+            "accuracy": float(recorded.get("accuracy", 0.0)),
+            "y_true": empty, "y_pred": empty, "chars": chars, "token_based": True,
+        }
+
+    # Original character-level path.
+    data = result["val_data"][:max_tokens+1]
     if len(data) <= block: return {}
     X = torch.stack([data[i:i+block] for i in range(0, min(len(data)-block, 4096), block)])
     Y = torch.stack([data[i+1:i+block+1] for i in range(0, min(len(data)-block, 4096), block)])
@@ -329,6 +289,68 @@ torch.set_num_threads(1)
 
 def _queue_training():
     st.session_state["_run_training_now"] = True
+
+def _load_colab_checkpoint(path_text, device="cpu"):
+    """Load a Colab artifact folder into the same result shape used by the UI."""
+    path = Path(path_text).expanduser()
+    model, tokenizer, config, metadata = load_colab_checkpoint(path, device=device)
+    history = history_from_csv(path / "training_metrics.csv")
+    st.session_state.result = {
+        "model": model,
+        "tokenizer": tokenizer,
+        "stoi": {token: i for i, token in enumerate(tokenizer.vocab)},
+        "itos": {i: token for i, token in enumerate(tokenizer.vocab)},
+        "chars": tokenizer.vocab,
+        "history": history,
+        "params": count_parameters(model),
+        "seconds": float((metadata.get("training") or {}).get("duration_seconds", 0.0)),
+        "device": str(next(model.parameters()).device),
+        "config": config,
+        "train_data": None,
+        "val_data": None,
+        "metadata": metadata,
+        "checkpoint_dir": str(path.resolve()),
+        "source": "colab",
+    }
+    st.session_state.comparisons = []
+    st.session_state["_run_training_now"] = False
+    return st.session_state.result
+
+def active_model_info(result):
+    """Read-only description of the exact model instance behind the UI."""
+    cfg = result["config"]
+    model = result["model"]
+    architecture = (
+        f"{cfg['n_layer']} layers · {cfg['n_head']} heads · {cfg['n_embd']} embed · "
+        f"block {cfg['block_size']} · dropout {cfg.get('dropout', 0)}"
+    )
+    tokenizer = result.get("tokenizer")
+    if tokenizer is not None:
+        meta = result.get("metadata") or {}
+        dataset_cfg = ((meta.get("dataset") or {}).get("config") or {})
+        sources = [
+            f"{name} ({settings.get('max_docs')} docs)"
+            for name, settings in dataset_cfg.items() if settings.get("enabled")
+        ]
+        dataset = ", ".join(sources) if sources else "Colab-exported corpus (see metadata.json)"
+        return {
+            "Model name": "Colab-exported MiniGPT (byte-level BPE)",
+            "Tokenizer type": tokenizer.config.get("type", "byte_level_bpe"),
+            "Vocabulary size": f"{tokenizer.vocab_size:,} tokens",
+            "Parameter count": f"{count_parameters(model):,}",
+            "Architecture": architecture,
+            "Dataset": dataset,
+            "Checkpoint path": result.get("checkpoint_dir", "unknown"),
+        }
+    return {
+        "Model name": "Legacy character-level MiniGPT (trained in this session)",
+        "Tokenizer type": "Character-level stoi/itos (from input text)",
+        "Vocabulary size": f"{len(result['chars']):,} characters",
+        "Parameter count": f"{count_parameters(model):,}",
+        "Architecture": architecture,
+        "Dataset": result.get("dataset", "input.txt (Tiny Shakespeare character corpus)"),
+        "Checkpoint path": result.get("checkpoint_path", "None - no checkpoint file loaded"),
+    }
 
 st.html("""
 <style>
@@ -421,9 +443,32 @@ with st.expander("Model Hyperparameters", expanded=True):
         upload = st.file_uploader("Optional: upload Tiny Shakespeare input.txt", type=["txt"])
         st.caption("If no file is uploaded, the app uses the local corpus or attempts the standard download.")
     with j3:
-        st.button("Train & Evaluate Model", type="primary", width="stretch", on_click=_queue_training, key="btn_train_drawer")
+        st.button("Train & Evaluate Model", type="primary", on_click=_queue_training, key="btn_train_drawer")
     with j4:
-        reset_button = st.button("Reset", type="secondary", width="stretch", key="reset_cta")
+        reset_button = st.button("Reset", type="secondary", key="reset_cta")
+
+    st.markdown("**Colab checkpoint (optional)**")
+    ck1, ck2 = st.columns([4, 1])
+    with ck1:
+        ckpt_path = st.text_input(
+            "Folder with model.pt, config.json, tokenizer.json",
+            value="mini_gpt_trained_model", key="ckpt_path",
+        )
+    with ck2:
+        load_ckpt = st.button("Load checkpoint", type="secondary", key="load_colab_cta")
+    st.caption(
+        f"Loading activates the exported model for this session on "
+        f"{'CUDA' if torch.cuda.is_available() else 'CPU'}. "
+        f"Shared architecture fingerprint: {config_fingerprint()}. "
+        "It never overwrites the legacy character model, input.txt, or existing checkpoints."
+    )
+    if load_ckpt:
+        try:
+            _load_colab_checkpoint(ckpt_path, device="cuda" if torch.cuda.is_available() else "cpu")
+            st.success(f"Loaded Colab checkpoint from {ckpt_path}")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Checkpoint load failed: {exc}")
 
 summary_slot.html(
     '<div class="config-summary">'
@@ -460,7 +505,11 @@ with training_slot:
                 try:
                     st.session_state.result = None
                     st.session_state.comparisons = []
-                    st.session_state.result = train_model(corpus, emb, heads, layers, block, dropout, batch, iterations, lr, eval_interval=20, seed=int(seed))
+                    trained = train_model(corpus, emb, heads, layers, block, dropout, batch, iterations, lr, eval_interval=20, seed=int(seed))
+                    trained["source"] = "legacy"
+                    trained["dataset"] = upload.name if upload else "input.txt (Tiny Shakespeare character corpus)"
+                    trained["checkpoint_path"] = "None - trained in memory in this Streamlit session"
+                    st.session_state.result = trained
                     status.update(label="Training complete", state="complete", expanded=False)
                 except Exception as e:
                     status.update(label="Training failed", state="error", expanded=True)
@@ -477,18 +526,36 @@ tab_dash, tab_hist, tab_gen, tab_sens, tab_conf = st.tabs([
 ])
 
 with tab_dash:
-    vocab_size = len(chars)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    total_params, breakdown = ui_parameter_breakdown(vocab_size, emb, heads, layers, block)
+    active_cfg = r["config"] if r is not None else dict(
+        n_embd=emb, n_head=heads, n_layer=layers, block_size=block, dropout=dropout
+    )
+    a_emb, a_heads = int(active_cfg["n_embd"]), int(active_cfg["n_head"])
+    a_layers, a_block = int(active_cfg["n_layer"]), int(active_cfg["block_size"])
+    active_chars = r["chars"] if r is not None else chars
+    vocab_size = len(active_chars)
+    device = r["device"] if r is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+    total_params, breakdown = ui_parameter_breakdown(vocab_size, a_emb, a_heads, a_layers, a_block)
+    meta = (r.get("metadata") or {}) if r is not None else {}
+    dataset_meta = meta.get("dataset") or {}
+    is_colab = r is not None and r.get("source") == "colab"
+    if is_colab and dataset_meta:
+        corpus_value = dataset_meta.get("total_tokens", dataset_meta.get("total_characters", 0))
+        corpus_label = f"{int(corpus_value):,}"
+        corpus_sub = "tokens from Colab dataset"
+    else:
+        corpus_label = f"{len(corpus):,}"
+        corpus_sub = "characters from input text"
+    token_sub = "byte-level BPE vocabulary" if is_colab else "unique character dictionary"
+    split_sub = "document-level 90/5/5 split" if is_colab else "90% train / 10% validation split"
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        ui_kpi("Corpus Size", f"{len(corpus):,}", "characters from input text")
+        ui_kpi("Corpus Size", corpus_label, corpus_sub)
     with k2:
-        ui_kpi("Vocabulary Size", f"{vocab_size} symbols", "unique character dictionary")
+        ui_kpi("Vocabulary Size", f"{vocab_size:,} tokens", token_sub)
     with k3:
-        ui_kpi("Model Parameters", f"{total_params:,}", f"{layers}L • {heads}H • {emb}D")
+        ui_kpi("Model Parameters", f"{total_params:,}", f"{a_layers}L • {a_heads}H • {a_emb}D")
     with k4:
-        ui_kpi("Compute & Split", f"{device.upper()}", "90% train / 10% validation split")
+        ui_kpi("Compute & Split", device.upper(), split_sub)
 
     arch_col, ready_col = st.columns([1.15, 1], gap="medium")
     with arch_col:
@@ -496,27 +563,46 @@ with tab_dash:
             ui_blueprint_rows(breakdown)
     with ready_col:
         with ui_card("Dataset Partition & Evaluation Readiness", "Split and active training targets"):
-            pill_text = "Trained &amp; Evaluated" if r is not None else "Ready to Train"
+            pill_text = "Colab checkpoint loaded" if is_colab else ("Trained &amp; Evaluated" if r is not None else "Ready to Train")
             pill_class = "status-pill-trained" if r is not None else "status-pill-ready"
             st.html(f'<div class="status-pill {pill_class}">{pill_text}</div>')
-            train_chars = int(0.9 * len(corpus))
-            val_chars = len(corpus) - train_chars
-            st.html(
-                '<div class="partition-bar"><div class="partition-train" style="width:90%"></div>'
-                '<div class="partition-val" style="width:10%"></div></div>'
-                f'<div class="partition-labels"><span><b>90% Train</b> {train_chars:,} chars</span>'
-                f'<span><b>10% Validation</b> {val_chars:,} chars</span></div>'
-            )
+            if is_colab and dataset_meta:
+                train_tokens = int(dataset_meta.get("train_tokens", 0))
+                val_tokens = int(dataset_meta.get("val_tokens", 0))
+                test_tokens = int(dataset_meta.get("test_tokens", 0))
+                total = max(train_tokens + val_tokens + test_tokens, 1)
+                st.html(
+                    '<div class="partition-bar">'
+                    f'<div class="partition-train" style="width:{100*train_tokens/total:.1f}%"></div>'
+                    f'<div class="partition-val" style="width:{100*(val_tokens+test_tokens)/total:.1f}%"></div></div>'
+                    f'<div class="partition-labels"><span><b>Train</b> {train_tokens:,} tokens</span>'
+                    f'<span><b>Val + test</b> {val_tokens+test_tokens:,} tokens</span></div>'
+                )
+                active_batch = int(active_cfg.get("batch_size", batch))
+                active_lr = float(active_cfg.get("learning_rate", lr))
+                active_iters = int(active_cfg.get("max_iters", iterations))
+            else:
+                train_chars = int(0.9 * len(corpus))
+                val_chars = len(corpus) - train_chars
+                st.html(
+                    '<div class="partition-bar"><div class="partition-train" style="width:90%"></div>'
+                    '<div class="partition-val" style="width:10%"></div></div>'
+                    f'<div class="partition-labels"><span><b>90% Train</b> {train_chars:,} chars</span>'
+                    f'<span><b>10% Validation</b> {val_chars:,} chars</span></div>'
+                )
+                active_batch, active_lr, active_iters = batch, lr, iterations
             st.html(
                 '<ul class="target-list">'
-                f'<li><span>Context window</span><b>{block}</b></li>'
-                f'<li><span>Batch size</span><b>{batch}</b></li>'
-                f'<li><span>Learning rate</span><b>{lr:g}</b></li>'
-                f'<li><span>Iterations</span><b>{iterations}</b></li>'
+                f'<li><span>Context window</span><b>{a_block}</b></li>'
+                f'<li><span>Batch size</span><b>{active_batch}</b></li>'
+                f'<li><span>Learning rate</span><b>{active_lr:g}</b></li>'
+                f'<li><span>Iterations</span><b>{active_iters}</b></li>'
                 '</ul>'
             )
 
-    with ui_card("Top Corpus Character Frequency Distribution", "Relative share of the 12 most common symbols"):
+    freq_title = "Colab Dataset Source Attribution" if is_colab else "Top Corpus Character Frequency Distribution"
+    freq_subtitle = "Reference input.txt only; training used the exported Colab corpus" if is_colab else "Relative share of the 12 most common symbols"
+    with ui_card(freq_title, freq_subtitle):
         counts = pd.Series(list(corpus)).value_counts().head(12)
         labels = ["space" if ch == " " else "\\n" if ch == "\n" else ch for ch in counts.index]
         percents = (counts / len(corpus) * 100).to_numpy()
@@ -528,58 +614,138 @@ with tab_dash:
         plt.setp(ax.get_yticklabels(), color="#57534E", fontsize=9)
         ax.margins(x=0.18)
         fig.tight_layout()
-        st.pyplot(fig, width="stretch")
+        st.pyplot(fig)
         plt.close(fig)
 
 with tab_hist:
     if r is None:
         ui_empty_tab("Training History")
     else:
+        unit = "token" if metrics.get("token_based") else "character"
+        source_note = "Recorded in Colab metadata" if len(metrics["y_true"]) == 0 else "Recomputed locally on exported validation split"
         m1, m2, m3, m4 = st.columns(4)
         with m1:
-            ui_kpi("Held-out Loss", f"{metrics['loss']:.4f}", "Deterministic validation subset")
+            ui_kpi("Held-out Loss", f"{metrics['loss']:.4f}", source_note)
         with m2:
             ui_kpi("Perplexity", f"{metrics['perplexity']:.3f}", "exp(cross-entropy)")
         with m3:
-            ui_kpi("Next-char Accuracy", f"{metrics['accuracy']*100:.2f}%", "Argmax match")
+            ui_kpi(f"Next-{unit} Accuracy", f"{metrics['accuracy']*100:.2f}%", "Argmax match")
         with m4:
-            ui_kpi("Evaluated Characters", f"{len(metrics['y_true']):,}", "Held-out 10% split")
+            ui_kpi(f"Evaluated {unit.title()}s", f"{len(metrics['y_true']):,}", "Deterministic held-out subset")
 
-        with ui_card("Loss Trajectory", "Training and validation curves for this run"):
-            ui_loss_chart(r["history"], figsize=(9.2, 3.2))
-        with ui_card("Checkpoint Logs", "Recorded at each evaluation step"):
-            hist_df = pd.DataFrame(r["history"])
-            st.dataframe(hist_df, width="stretch", hide_index=True)
-            st.download_button("Download training history CSV", hist_df.to_csv(index=False).encode(), "training_history.csv", "text/csv")
-        st.caption("Perplexity = exp(cross-entropy loss). Accuracy is exact next-character argmax accuracy, not a measure of overall literary quality.")
+        if not r["history"]["step"]:
+            st.info("No training_metrics.csv was found in this checkpoint folder, so loss curves are unavailable. All other metrics above come from the exported metadata.")
+        else:
+            with ui_card("Loss Trajectory", "Training and validation curves for this run"):
+                ui_loss_chart(r["history"], figsize=(9.2, 3.2))
+            with ui_card("Checkpoint Logs", "Recorded at each evaluation step"):
+                hist_df = pd.DataFrame(r["history"])
+                st.dataframe(hist_df, hide_index=True)
+                st.download_button("Download training history CSV", hist_df.to_csv(index=False).encode(), "training_history.csv", "text/csv")
+        st.caption("Perplexity = exp(cross-entropy loss). Accuracy is exact next-token/character argmax accuracy, not a measure of overall literary quality.")
 
 with tab_gen:
     if r is None:
         ui_empty_tab("Text Generation")
     else:
+        is_bpe = r.get("tokenizer") is not None
+        default_prompt = ("Explain artificial intelligence in simple English."
+                          if is_bpe else "ROMEO:")
+        known_defaults = {"", "ROMEO:", "Explain artificial intelligence in simple English."}
+        if "gen_prompt" not in st.session_state:
+            st.session_state["gen_prompt"] = default_prompt
+        elif st.session_state["gen_prompt"] in known_defaults:
+            st.session_state["gen_prompt"] = default_prompt
+
+        with ui_card("Active Model", "Exact model used by Generate text"):
+            info = active_model_info(r)
+            st.markdown("\n".join(f"- **{key}:** {value}" for key, value in info.items()))
+
         with ui_card("Sampling Controls", "Prompt and decoding parameters"):
-            prompt = st.text_input("Prompt", value="ROMEO:", key="gen_prompt")
+            prompt = st.text_area(
+                "Prompt", key="gen_prompt", height=100,
+                placeholder="Type any prompt, for example: Explain how a computer network works.",
+            )
+            st.caption("Editable prompt. Your text is preserved across reruns unless you load a different model type.")
             g1, g2, g3 = st.columns(3)
             with g1:
-                max_new = st.slider("New characters", 50, 1000, 300, 50)
+                if is_bpe:
+                    max_new = st.slider("New tokens", 20, 600, 160, 20, key="bpe_max_new")
+                else:
+                    max_new = st.slider("New characters", 50, 1000, 300, 50, key="char_max_new")
             with g2:
                 temp = st.slider("Temperature", 0.1, 1.5, 0.8, 0.1, key="gen_temp")
             with g3:
-                top_k = st.slider("Top-k (0 = disabled)", 0, min(30,len(r["chars"])), 0)
-        with ui_card("Generated Output", "Sampled from the active model"):
+                if is_bpe:
+                    top_k = st.slider("Top-k (0 = disabled)", 0, min(100, len(r["chars"])), 40, key="bpe_top_k")
+                else:
+                    top_k = st.slider("Top-k (0 = disabled)", 0, min(30, len(r["chars"])), 0, key="char_top_k")
+            if is_bpe:
+                g4, g5, g6 = st.columns(3)
+                with g4:
+                    top_p = st.slider("Top-p / nucleus", 0.0, 1.0, 0.9, 0.05, key="bpe_top_p")
+                with g5:
+                    repetition_penalty = st.slider("Repetition penalty", 1.0, 1.5, 1.15, 0.05, key="bpe_rep_penalty")
+                with g6:
+                    no_repeat = st.slider("No-repeat n-gram (0 = disabled)", 0, 8, 4, key="bpe_no_repeat")
+
+        with ui_card("Generated Output", "Continuation sampled from the active model"):
             if st.button("Generate text", type="primary", key="generate_cta"):
-                if not prompt: prompt=" "
-                unknown=[ch for ch in prompt if ch not in r["stoi"]]
-                if unknown: st.warning(f"Prompt includes characters outside the model vocabulary: {unknown!r}. They will be skipped.")
-                ids=[r["stoi"][ch] for ch in prompt if ch in r["stoi"]]
-                if not ids: ids=[0]
-                inp=torch.tensor([ids],dtype=torch.long,device=r["device"])
-                generated=r["model"].generate(inp,max_new_tokens=max_new,temperature=temp,top_k=top_k)[0].tolist()
-                output_text="".join(r["itos"][i] for i in generated)
-                st.text_area("Generated output", output_text, height=300)
-                st.download_button("Download generated text", output_text, "generated_text.txt", "text/plain")
+                prompt = prompt.strip() or ("Explain " if is_bpe else " ")
+                st.caption(f"Original prompt: {prompt!r}")
+                model = r["model"]
+                model.eval()
+                if is_bpe:
+                    tokenizer = r["tokenizer"]
+                    block_size = int(r["config"]["block_size"])
+                    full_length = len(tokenizer.encode(prompt, add_special=False)) + 1
+                    prompt_ids = tokenizer.encode_prompt(prompt, max_context_tokens=block_size)
+                    if full_length > len(prompt_ids):
+                        st.warning(
+                            f"Prompt was {full_length} tokens but the context window is {block_size}. "
+                            f"Kept the last {len(prompt_ids)} tokens."
+                        )
+                    inp = torch.tensor([prompt_ids], dtype=torch.long, device=r["device"])
+                    with torch.inference_mode():
+                        generated = model.generate(
+                            inp, max_new_tokens=max_new, temperature=temp, top_k=top_k,
+                            top_p=top_p, repetition_penalty=repetition_penalty,
+                            no_repeat_ngram_size=no_repeat,
+                            eos_id=tokenizer.eos_id, stop_at_eos=True,
+                        )[0].tolist()
+                    new_ids = generated[len(prompt_ids):]
+                    continuation = tokenizer.decode(new_ids, skip_special=True, stop_at_eos=True)
+                    eos_info = " (EOS reached early)" if tokenizer.eos_id in new_ids else ""
+                    st.caption(
+                        f"{len(prompt_ids)} prompt tokens → {len(new_ids)} newly generated tokens{eos_info}"
+                    )
+                else:
+                    unknown = [ch for ch in prompt if ch not in r["stoi"]]
+                    if unknown:
+                        st.warning(f"Prompt includes characters outside the model vocabulary: {unknown!r}. They will be skipped.")
+                    ids = [r["stoi"][ch] for ch in prompt if ch in r["stoi"]]
+                    if not ids: ids = [0]
+                    inp = torch.tensor([ids], dtype=torch.long, device=r["device"])
+                    with torch.inference_mode():
+                        generated = model.generate(
+                            inp, max_new_tokens=max_new, temperature=temp, top_k=top_k
+                        )[0].tolist()
+                    new_ids = generated[len(ids):]
+                    continuation = "".join(r["itos"][i] for i in new_ids)
+                    st.caption(f"{len(ids)} prompt characters → {len(new_ids)} newly generated characters")
+
+                if not new_ids:
+                    st.warning("The model produced no new tokens. Try a higher temperature or a different prompt.")
+                elif not continuation.strip():
+                    st.warning(
+                        "New tokens were generated but decoded to empty or special-only text "
+                        f"(token ids: {new_ids[:10]}). Try a different prompt or temperature."
+                    )
+                else:
+                    st.text_area("Generated continuation", continuation, height=300, key="generated_continuation")
+                    st.download_button("Download generated continuation", continuation, "generated_continuation.txt", "text/plain")
             else:
-                st.caption("Set a prompt and click Generate text to sample from the active model.")
+                st.caption("Edit the prompt above and click Generate text to sample from the active model.")
 
 with tab_sens:
     with ui_card("Experiment Runner", "Train smaller and larger architectures on the same split and seed"):
@@ -608,7 +774,7 @@ with tab_sens:
     if st.session_state.comparisons:
         df=pd.DataFrame(st.session_state.comparisons)
         with ui_card("Comparison Results", "All architecture runs from this session"):
-            st.dataframe(df, width="stretch", hide_index=True)
+            st.dataframe(df, hide_index=True)
             st.download_button("Download comparison CSV",df.to_csv(index=False).encode(),"parameter_comparison.csv","text/csv")
         with ui_card("Architecture Comparison", "Select a metric to compare architectures"):
             metric_choice=st.selectbox("Plot metric", ["Validation loss","Perplexity","Accuracy (%)","Parameters","Train time (s)"])
@@ -621,33 +787,44 @@ with tab_conf:
     if r is None:
         ui_empty_tab("Confusion Matrix")
     else:
-        with ui_card("Matrix Controls", "Top-character preview settings"):
-            st.caption("A confusion matrix for character prediction can be large. The plot shows the most frequent actual characters in this evaluated subset; all other characters are grouped as 'other' for readability.")
-            top_n=st.slider("Number of frequent characters to display",5,min(30,len(r["chars"])),min(15,len(r["chars"])))
-        with ui_card("Row-normalized Next-character Confusion Matrix", "Actual vs predicted character groups"):
-            true,pred=metrics["y_true"],metrics["y_pred"]
-            counts=np.bincount(true,minlength=len(r["chars"]))
-            top_ids=np.argsort(counts)[::-1][:top_n]
-            mapping={int(v):i for i,v in enumerate(top_ids)}
-            other_idx=len(top_ids)
-            yt=np.array([mapping.get(int(v),other_idx) for v in true])
-            yp=np.array([mapping.get(int(v),other_idx) for v in pred])
-            labels=[repr(r["itos"][int(i)]) for i in top_ids]+["other"]
-            cm=confusion_matrix(yt,yp,labels=list(range(len(labels))),normalize="true")
-            fig,ax=plt.subplots(figsize=(9.2,4.8),dpi=110)
-            fig.patch.set_facecolor("#FFFFFF")
-            sns.heatmap(cm,xticklabels=labels,yticklabels=labels,cmap="Oranges",ax=ax,annot=False,cbar_kws={"shrink":0.8},linewidths=0.4,linecolor="#FFFFFF")
-            ax.set_xlabel("Predicted character", color="#57534E", fontsize=10)
-            ax.set_ylabel("Actual character", color="#57534E", fontsize=10)
-            ax.tick_params(labelsize=8, colors="#57534E")
-            fig.tight_layout()
-            st.pyplot(fig, width="stretch")
-            plt.close(fig)
-            st.caption("Rows are normalized, so each row shows the distribution of predictions for that actual-character group.")
-        with ui_card("Precision / Recall / F1 by Character Group", "Per-character error analysis"):
-            report=classification_report(yt,yp,labels=list(range(len(labels))),target_names=labels,zero_division=0,output_dict=True)
-            rep=pd.DataFrame(report).T.reset_index().rename(columns={"index":"Class"})
-            st.dataframe(rep, width="stretch")
-            st.download_button("Download classification report CSV",rep.to_csv(index=False).encode(),"classification_report.csv","text/csv")
+        unit = "token" if metrics.get("token_based") else "character"
+        if len(metrics["y_true"]) == 0:
+            with ui_card(f"Next-{unit.title()} Confusion Matrix", "Not available for this checkpoint"):
+                st.info(
+                    "This checkpoint has no validation.txt long enough for local recomputation, so "
+                    "per-token predictions are unavailable. Aggregate loss, perplexity, and accuracy "
+                    "shown in Training History come from metadata.json."
+                )
+        else:
+            max_display = max(2, min(30, len(r["chars"])))
+            default_display = min(15, max_display)
+            with ui_card("Matrix Controls", f"Top-{unit} preview settings"):
+                st.caption(f"The plot shows the most frequent actual {unit}s in this evaluated subset; all others are grouped as 'other'.")
+                top_n=st.slider("Number of frequent groups to display", 5, max_display, default_display)
+            with ui_card(f"Row-normalized Next-{unit.title()} Confusion Matrix", "Actual vs predicted groups"):
+                true,pred=metrics["y_true"],metrics["y_pred"]
+                counts=np.bincount(true,minlength=len(r["chars"]))
+                top_ids=np.argsort(counts)[::-1][:top_n]
+                mapping={int(v):i for i,v in enumerate(top_ids)}
+                other_idx=len(top_ids)
+                yt=np.array([mapping.get(int(v),other_idx) for v in true])
+                yp=np.array([mapping.get(int(v),other_idx) for v in pred])
+                labels=[repr(r["itos"][int(i)]) for i in top_ids]+["other"]
+                cm=confusion_matrix(yt,yp,labels=list(range(len(labels))),normalize="true")
+                fig,ax=plt.subplots(figsize=(9.2,4.8),dpi=110)
+                fig.patch.set_facecolor("#FFFFFF")
+                sns.heatmap(cm,xticklabels=labels,yticklabels=labels,cmap="Oranges",ax=ax,annot=False,cbar_kws={"shrink":0.8},linewidths=0.4,linecolor="#FFFFFF")
+                ax.set_xlabel(f"Predicted {unit}", color="#57534E", fontsize=10)
+                ax.set_ylabel(f"Actual {unit}", color="#57534E", fontsize=10)
+                ax.tick_params(labelsize=8, colors="#57534E")
+                fig.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+                st.caption("Rows are normalized, so each row shows the distribution of predictions for that actual group.")
+            with ui_card(f"Precision / Recall / F1 by {unit.title()} Group", f"Per-{unit} error analysis"):
+                report=classification_report(yt,yp,labels=list(range(len(labels))),target_names=labels,zero_division=0,output_dict=True)
+                rep=pd.DataFrame(report).T.reset_index().rename(columns={"index":"Class"})
+                st.dataframe(rep)
+                st.download_button("Download classification report CSV",rep.to_csv(index=False).encode(),"classification_report.csv","text/csv")
 
 st.html('<div class="footnote">Academic note: all displayed metrics are computed from the model run in this session. The held-out 10% split is called validation in the original notebook; for a rigorous final report, reserve a separate test split before final evaluation.</div>')

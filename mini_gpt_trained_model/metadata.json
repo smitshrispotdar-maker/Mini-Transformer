@@ -1,0 +1,157 @@
+{
+  "format_version": 1,
+  "source_code": {
+    "shared_module_fingerprint": "6310b3745d82156b",
+    "note": "Identical minigpt_colab.py is embedded in this notebook and imported by local app.py."
+  },
+  "dataset": {
+    "sources": {
+      "tinystories": {
+        "path": "roneneldan/TinyStories",
+        "name": null,
+        "license": "cdla-sharing-1.0",
+        "url": "https://huggingface.co/datasets/roneneldan/TinyStories"
+      },
+      "wikitext103": {
+        "path": "Salesforce/wikitext",
+        "name": "wikitext-103-v1",
+        "license": "see dataset card (WikiText-103 derived from Wikipedia)",
+        "url": "https://huggingface.co/datasets/Salesforce/wikitext"
+      },
+      "fineweb_edu": {
+        "path": "HuggingFaceFW/fineweb-edu",
+        "name": "sample-10BT",
+        "license": "odc-by",
+        "url": "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu"
+      }
+    },
+    "config": {
+      "tinystories": {
+        "enabled": true,
+        "max_docs": 25000
+      },
+      "wikitext103": {
+        "enabled": true,
+        "max_docs": 8000
+      },
+      "fineweb_edu": {
+        "enabled": false,
+        "max_docs": 3000
+      }
+    },
+    "stats": {
+      "requested_by_source": {
+        "tinystories": 25000,
+        "wikitext103": 8000
+      },
+      "kept_by_source": {
+        "tinystories": 25000,
+        "wikitext103": 3539
+      },
+      "after_dedupe": 28539,
+      "train": {
+        "documents": 25685,
+        "characters": 21667648,
+        "paragraphs": 110154,
+        "by_source": {
+          "tinystories": 22511,
+          "wikitext103": 3174
+        }
+      },
+      "val": {
+        "documents": 1427,
+        "characters": 1197166,
+        "paragraphs": 5954,
+        "by_source": {
+          "tinystories": 1233,
+          "wikitext103": 194
+        }
+      },
+      "test": {
+        "documents": 1427,
+        "characters": 1191909,
+        "paragraphs": 6191,
+        "by_source": {
+          "tinystories": 1256,
+          "wikitext103": 171
+        }
+      }
+    },
+    "total_characters": 24056723,
+    "train_tokens": 10993716,
+    "val_tokens": 607586,
+    "test_tokens": 604864,
+    "total_tokens": 12206166
+  },
+  "tokenizer": {
+    "type": "byte_level_bpe",
+    "target_vocab_size": 4096,
+    "actual_vocab_size": 4096,
+    "special_tokens": [
+      "<pad>",
+      "<bos>",
+      "<eos>",
+      "<unk>"
+    ],
+    "byte_fallback": true,
+    "trained_characters": 21719016,
+    "trained_chunks": 8467845,
+    "merge_count": 3836
+  },
+  "architecture": {
+    "vocab_size": 4096,
+    "n_embd": 192,
+    "n_head": 6,
+    "n_layer": 4,
+    "block_size": 192,
+    "dropout": 0.1,
+    "batch_size": 16,
+    "max_iters": 4000,
+    "learning_rate": 0.0003,
+    "eval_interval": 200
+  },
+  "training": {
+    "optimizer": "AdamW",
+    "weight_decay": 0.1,
+    "betas": [
+      0.9,
+      0.95
+    ],
+    "scheduler": "linear warmup + cosine decay to 10%",
+    "warmup_steps": 120,
+    "grad_clip": 1.0,
+    "amp_dtype": "torch.bfloat16",
+    "device": "cuda",
+    "gpu_name": "Tesla T4",
+    "duration_seconds": 284.2,
+    "best_val_loss": 2.401179,
+    "early_stopped": false,
+    "parameter_count": 3391360
+  },
+  "evaluation": {
+    "val_loss": 2.415027,
+    "val_perplexity": 11.1901,
+    "val_accuracy": 0.543376,
+    "test_loss": 2.410567,
+    "test_perplexity": 11.1403,
+    "test_accuracy": 0.543742,
+    "accuracy": 0.543742
+  },
+  "generation": {
+    "prompts": [
+      "Explain artificial intelligence in simple English.",
+      "What is machine learning?",
+      "Explain the importance of education.",
+      "Write a paragraph about technology.",
+      "Explain the difference between supervised and unsupervised learning.",
+      "Explain how a computer network works."
+    ],
+    "settings": {
+      "temperature": 0.8,
+      "top_k": 40,
+      "top_p": 0.9,
+      "repetition_penalty": 1.15,
+      "no_repeat_ngram_size": 4
+    }
+  }
+}

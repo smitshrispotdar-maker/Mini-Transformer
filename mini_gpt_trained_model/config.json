@@ -1,0 +1,12 @@
+{
+  "vocab_size": 4096,
+  "n_embd": 192,
+  "n_head": 6,
+  "n_layer": 4,
+  "block_size": 192,
+  "dropout": 0.1,
+  "batch_size": 16,
+  "max_iters": 4000,
+  "learning_rate": 0.0003,
+  "eval_interval": 200
+}
